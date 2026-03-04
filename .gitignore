@@ -1,0 +1,22 @@
+node_modules/
+.vscode/
+
+# ��������
+src/config/provider-config.mjs
+config.js
+config.mjs
+/config/
+
+# ����ʱ����
+browser_profiles/
+logs/
+request_logs.log
+cooldownAccounts.log
+cooldown-accounts.log
+
+# ��ʱ�ļ�
+test.js
+test.mjs
+
+.claude/
+.serena/
