@@ -3,7 +3,6 @@ import {createEvent, getGitRevision} from "../utils/cookie-utils.mjs";
 import ProviderManager from "../core/provider-manager.mjs";
 import {v4 as uuidv4} from "uuid";
 import '../network/proxy-agent.mjs';
-import {storeImage} from '../storage/image-storage.mjs';
 import fetch from 'node-fetch';
 import path from 'path';
 import geoip from 'geoip-lite';
@@ -292,6 +291,73 @@ function startSseKeepAlive(res, intervalMs = 8000) {
     };
 }
 
+function createRequestState() {
+    let closed = false;
+    return {
+        markClosed() {
+            closed = true;
+        },
+        isClosed() {
+            return closed;
+        }
+    };
+}
+
+function readJsonBodyWithLimit(req, res) {
+    return new Promise((resolve) => {
+        let rawBody = "";
+        let payloadTooLarge = false;
+        let receivedBytes = 0;
+
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => {
+            if (payloadTooLarge) {
+                return;
+            }
+            receivedBytes += Buffer.byteLength(chunk, "utf8");
+            if (receivedBytes > requestBodyLimitBytes) {
+                payloadTooLarge = true;
+                res.status(413).json({
+                    error: {
+                        code: 413,
+                        message: `Request body too large. Max ${requestBodyLimitBytes} bytes.`,
+                    }
+                });
+                resolve(null);
+                return;
+            }
+            rawBody += chunk;
+        });
+
+        req.on("end", () => {
+            if (payloadTooLarge || res.headersSent) {
+                return;
+            }
+            try {
+                resolve(JSON.parse(rawBody));
+            } catch {
+                res.status(400).json({error: {code: 400, message: "Invalid JSON"}});
+                resolve(null);
+            }
+        });
+
+        req.on("error", () => {
+            if (!res.headersSent) {
+                res.status(400).json({error: {code: 400, message: "Invalid request body"}});
+            }
+            resolve(null);
+        });
+    });
+}
+
+function isCapacityError(error) {
+    const message = String(error?.message || error || "");
+    return message.includes("All sessions are saturated") ||
+        message.includes("Current load is saturated") ||
+        message.includes("No available session") ||
+        message.includes("Session was occupied or mode is unavailable");
+}
+
 // handle preflight request
 app.use((req, res, next) => {
     if (req.method === "OPTIONS") {
@@ -332,54 +398,20 @@ app.get("/v1/models", OpenAIApiKeyAuth, (req, res) => {
 });
 // handle openai format model request
 app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
-    // 鐢ㄤ簬瀛樺偍璇锋眰浣?
-    req.rawBody = "";
-    req.setEncoding("utf8");
-    clientState.setClosed(false);
-    let payloadTooLarge = false;
-    let receivedBytes = 0;
-
-    // 鎺ユ敹鏁版嵁
-    req.on("data", function (chunk) {
-        if (payloadTooLarge) {
-            return;
-        }
-        receivedBytes += Buffer.byteLength(chunk, "utf8");
-        if (receivedBytes > requestBodyLimitBytes) {
-            payloadTooLarge = true;
-            res.status(413).json({
-                error: {
-                    code: 413,
-                    message: `Request body too large. Max ${requestBodyLimitBytes} bytes.`,
-                }
-            });
-            return;
-        }
-        req.rawBody += chunk;
-    });
-
-    // 鏁版嵁鎺ユ敹瀹屾瘯鍚庡鐞嗚姹?
-    req.on("end", async () => {
-        if (payloadTooLarge || res.headersSent) {
+    (async () => {
+        const requestState = createRequestState();
+        const jsonBody = await readJsonBodyWithLimit(req, res);
+        if (!jsonBody || res.headersSent) {
             return;
         }
         console.log("Handling OpenAI-format request.");
-        res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-
-        let jsonBody;
-        try {
-            jsonBody = JSON.parse(req.rawBody);
-        } catch (error) {
-            res.status(400).json({error: {code: 400, message: "Invalid JSON"}});
-            return;
-        }
         const isStreamRequest = Boolean(jsonBody.stream);
         let stopSseKeepAlive = () => {
         };
 
         // 瑙勮寖鍖栨秷鎭?
-        jsonBody.messages = await openaiNormalizeMessages(jsonBody.messages);
+        const openAiNormalizationResult = await openaiNormalizeMessages(jsonBody.messages);
+        jsonBody.messages = openAiNormalizationResult.messages;
 
         console.log("message length: " + jsonBody.messages.length);
 
@@ -410,7 +442,7 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
         // 鐩戝惉瀹㈡埛绔叧闂簨浠?
         res.on("close", () => {
             console.log(" > [Client closed]");
-            clientState.setClosed(true);
+            requestState.markClosed();
             stopSseKeepAlive();
             if (completion) {
                 completion.removeAllListeners();
@@ -422,9 +454,6 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
         });
 
         try {
-            if (isStreamRequest) {
-                stopSseKeepAlive = startSseKeepAlive(res);
-            }
             // 鑾峰彇瀹㈡埛绔?IP
             const clientIpAddress = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
             const geo = geoip.lookup(clientIpAddress) || {};
@@ -457,8 +486,18 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
                 stream: isStreamRequest,
                 proxyModel: jsonBody.model,
                 useCustomMode: process.env.USE_CUSTOM_MODE === "true",
-                modeSwitched: modeSwitched // 浼犻€掓ā寮忓垏鎹㈡爣蹇?
+                modeSwitched: modeSwitched, // 浼犻€掓ā寮忓垏鎹㈡爣蹇?
+                images: openAiNormalizationResult.images,
+                requestState,
             }));
+
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            if (isStreamRequest) {
+                res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
+                stopSseKeepAlive = startSseKeepAlive(res);
+            } else {
+                res.setHeader("Content-Type", "application/json;charset=utf-8");
+            }
 
             // 鐩戝惉寮€濮嬩簨浠?
             completion.on("start", (id) => {
@@ -620,9 +659,23 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
             stopSseKeepAlive();
             releaseSession();
 
+            if (!res.headersSent && isCapacityError(error)) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                res.status(503).json({
+                    error: {
+                        code: 503,
+                        type: "server_busy",
+                        message: "Server is busy. Please retry later.",
+                    }
+                });
+                return;
+            }
+
             const errorMessage = "Error occurred, please check the log.\n\n<pre>" + (error.stack || error) + "</pre>";
             if (!res.headersSent) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
                 if (isStreamRequest) {
+                    res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
                     res.write(
                         createEvent("data", {
                             choices: [
@@ -648,6 +701,7 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
                     res.write(createEvent("data", "[DONE]"));
                     res.end();
                 } else {
+                    res.setHeader("Content-Type", "application/json;charset=utf-8");
                     res.write(
                         JSON.stringify({
                             id: uuidv4(),
@@ -677,6 +731,11 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
                 }
             }
         }
+    })().catch((error) => {
+        console.error("Unhandled OpenAI request error:", error);
+        if (!res.headersSent) {
+            res.status(500).json({error: {code: 500, message: "Internal Server Error"}});
+        }
     });
 });
 
@@ -684,6 +743,7 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
 async function openaiNormalizeMessages(messages) {
     let normalizedMessages = [];
     let currentSystemMessage = "";
+    const images = [];
 
     for (let message of messages) {
         if (message.role === 'system') {
@@ -713,8 +773,7 @@ async function openaiNormalizeMessages(messages) {
                         // 鑾峰彇鍥剧墖 base64
                         const base64Data = await fetchImageAsBase64(item.image_url.url);
                         if (base64Data) {
-                            const {imageId} = storeImage(base64Data, mediaType);
-                            console.log(`Image stored with ID: ${imageId}, Media Type: ${mediaType}`);
+                            images.push({base64Data, mediaType});
                         } else {
                             console.warn('Failed to store image due to missing data.');
                         }
@@ -735,7 +794,7 @@ async function openaiNormalizeMessages(messages) {
         normalizedMessages.push({role: 'system', content: currentSystemMessage});
     }
 
-    return normalizedMessages;
+    return {messages: normalizedMessages, images};
 }
 
 // 鍥剧墖 URL 鑾峰彇濯掍綋绫诲瀷
@@ -781,51 +840,20 @@ async function fetchImageAsBase64(url) {
 
 // handle anthropic format model request
 app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
-    req.rawBody = "";
-    req.setEncoding("utf8");
-    clientState.setClosed(false);
-    let payloadTooLarge = false;
-    let receivedBytes = 0;
-
-    req.on("data", function (chunk) {
-        if (payloadTooLarge) {
-            return;
-        }
-        receivedBytes += Buffer.byteLength(chunk, "utf8");
-        if (receivedBytes > requestBodyLimitBytes) {
-            payloadTooLarge = true;
-            res.status(413).json({
-                error: {
-                    code: 413,
-                    message: `Request body too large. Max ${requestBodyLimitBytes} bytes.`,
-                }
-            });
-            return;
-        }
-        req.rawBody += chunk;
-    });
-
-    req.on("end", async () => {
-        if (payloadTooLarge || res.headersSent) {
+    (async () => {
+        const requestState = createRequestState();
+        const jsonBody = await readJsonBodyWithLimit(req, res);
+        if (!jsonBody || res.headersSent) {
             return;
         }
         console.log("Handling Anthropic-format request.");
-        res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        let jsonBody;
-
-        try {
-            jsonBody = JSON.parse(req.rawBody);
-        } catch (error) {
-            res.status(400).json({error: {code: 400, message: "Invalid JSON"}});
-            return;
-        }
         const isStreamRequest = Boolean(jsonBody.stream);
         let stopSseKeepAlive = () => {
         };
 
         // 澶勭悊娑堟伅鏍煎紡
-        jsonBody.messages = anthropicNormalizeMessages(jsonBody.messages);
+        const anthropicNormalizationResult = anthropicNormalizeMessages(jsonBody.messages);
+        jsonBody.messages = anthropicNormalizationResult.messages;
 
         if (jsonBody.system) {
             // 鎶婄郴缁熸秷鎭姞鍏?messages 鐨勯鏉?
@@ -866,7 +894,7 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
         // 鐩戝惉瀹㈡埛绔叧闂簨浠?
         res.on("close", () => {
             console.log(" > [Client closed]");
-            clientState.setClosed(true);
+            requestState.markClosed();
             stopSseKeepAlive();
             if (completion) {
                 completion.removeAllListeners();
@@ -878,9 +906,6 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
         });
 
         try {
-            if (isStreamRequest) {
-                stopSseKeepAlive = startSseKeepAlive(res);
-            }
             // 鑾峰彇瀹㈡埛绔?IP
             const clientIpAddress = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
             const geo = geoip.lookup(clientIpAddress) || {};
@@ -913,8 +938,18 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
                 stream: isStreamRequest,
                 proxyModel: proxyModel,
                 useCustomMode: process.env.USE_CUSTOM_MODE === "true",
-                modeSwitched: modeSwitched // 浼犻€掓ā寮忓垏鎹㈡爣蹇?
+                modeSwitched: modeSwitched, // 浼犻€掓ā寮忓垏鎹㈡爣蹇?
+                images: anthropicNormalizationResult.images,
+                requestState,
             }));
+
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            if (isStreamRequest) {
+                res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
+                stopSseKeepAlive = startSseKeepAlive(res);
+            } else {
+                res.setHeader("Content-Type", "application/json;charset=utf-8");
+            }
 
             // 鐩戝惉寮€濮嬩簨浠?
             completion.on("start", (id) => {
@@ -1020,9 +1055,23 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
             stopSseKeepAlive();
             releaseSession();
 
+            if (!res.headersSent && isCapacityError(error)) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                res.status(503).json({
+                    type: "error",
+                    error: {
+                        type: "overloaded_error",
+                        message: "Server is busy. Please retry later.",
+                    }
+                });
+                return;
+            }
+
             const errorMessage = "Error occurred, please check the log.\n\n<pre>" + (error.stack || error) + "</pre>";
             if (!res.headersSent) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
                 if (isStreamRequest) {
+                    res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
                     res.write(createEvent("content_block_delta", {
                         type: "content_block_delta",
                         index: 0,
@@ -1030,6 +1079,7 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
                     }));
                     res.end();
                 } else {
+                    res.setHeader("Content-Type", "application/json;charset=utf-8");
                     res.write(JSON.stringify({
                         id: uuidv4(),
                         content: [{text: errorMessage}, {id: "string", name: "string", input: {}}],
@@ -1042,12 +1092,18 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
                 }
             }
         }
+    })().catch((error) => {
+        console.error("Unhandled Anthropic request error:", error);
+        if (!res.headersSent) {
+            res.status(500).json({error: {code: 500, message: "Internal Server Error"}});
+        }
     });
 });
 
 // 杈呭姪鍑芥暟锛氳鑼冨寲娑堟伅鏍煎紡
 function anthropicNormalizeMessages(messages) {
-    return messages.map(message => {
+    const images = [];
+    const normalizedMessages = messages.map(message => {
         if (typeof message.content === 'string') {
             return message;
         } else if (Array.isArray(message.content)) {
@@ -1060,8 +1116,7 @@ function anthropicNormalizeMessages(messages) {
             // 澶勭悊鍥剧墖鍐呭锛屽瓨鍌ㄥ浘鐗?
             message.content.forEach(item => {
                 if (item.type === 'image' && item.source?.type === 'base64') {
-                    const {imageId, mediaType} = storeImage(item.source.data, item.source.media_type);
-                    console.log(`Image stored with ID: ${imageId}, Media Type: ${mediaType}`);
+                    images.push({base64Data: item.source.data, mediaType: item.source.media_type});
                 }
             });
 
@@ -1071,6 +1126,7 @@ function anthropicNormalizeMessages(messages) {
             return message; // 鏈煡鏍煎紡锛岃繑鍥炲師濮嬫秷鎭?
         }
     });
+    return {messages: normalizedMessages, images};
 }
 
 
@@ -1118,22 +1174,4 @@ function OpenAIApiKeyAuth(req, res, next) {
 
     next();
 }
-
-// Path: client-state
-class ClientState {
-    #closed = false;
-
-    setClosed(value) {
-        this.#closed = Boolean(value);
-    }
-
-    isClosed() {
-        return this.#closed;
-    }
-}
-
-export const clientState = new ClientState();
-
-
-
 

@@ -1,8 +1,10 @@
 import YouProvider from '../providers/you/you-provider.mjs';
-import {config as youConfig} from '../config/provider-config.mjs';
 
 class ProviderManager {
-    constructor(config = youConfig) {
+    constructor(config) {
+        if (!config) {
+            throw new Error('ProviderManager requires a config object.');
+        }
         this.config = config;
         this.provider = new YouProvider(this.config);
         console.log('Initialized with you provider.');

@@ -9,9 +9,7 @@ import '../../network/proxy-agent.mjs';
 import {formatMessages} from '../../messages/format-messages.mjs';
 import NetworkMonitor from '../../network/network-monitor.mjs';
 import {insertGarbledText} from './garbled-text.mjs';
-import * as imageStorage from "../../storage/image-storage.mjs";
 import Logger from './provider-logger.mjs';
-import {clientState} from "../../server/index.mjs";
 import SessionManager from '../../core/session-manager.mjs';
 import {updateLocalConfigCookieByEmailNonBlocking} from './cookie-updater.mjs';
 
@@ -922,8 +920,11 @@ class YouProvider {
                             stream = false,
                             proxyModel,
                             useCustomMode = false,
-                            modeSwitched = false
+                            modeSwitched = false,
+                            images = [],
+                            requestState = null,
                         }) {
+        const isClientClosed = () => Boolean(requestState && typeof requestState.isClosed === "function" && requestState.isClosed());
         if (this.networkMonitor.isNetworkBlocked()) {
             throw new Error("Network error, please try again later.");
         }
@@ -1210,7 +1211,7 @@ class YouProvider {
             // 鍥剧墖涓婁紶閫昏緫
             const maxImageSizeMB = 5; // 鏈€澶у厑璁稿浘鐗囧ぇ灏忛檺鍒?(MB)
             // 浠?imageStorage 涓幏鍙栨渶鍚庝竴涓浘鐗?
-            var lastImage = imageStorage.getLastImage();
+            const lastImage = Array.isArray(images) && images.length > 0 ? images[images.length - 1] : null;
             var uploadedImage = null;
             if (lastImage) {
                 const sizeInBytes = Buffer.byteLength(lastImage.base64Data, 'base64');
@@ -1219,8 +1220,8 @@ class YouProvider {
                 if (sizeInMB > maxImageSizeMB) {
                     console.warn(`Image exceeds ${maxImageSizeMB}MB (${sizeInMB.toFixed(2)}MB). Skipping upload.`);
                 } else {
-                    const fileExtension = lastImage.mediaType.split('/')[1];
-                    const fileName = `${lastImage.imageId}.${fileExtension}`;
+                    const fileExtension = (lastImage.mediaType || 'application/octet-stream').split('/')[1] || 'bin';
+                    const fileName = `image_${uuidV4().slice(0, 8)}.${fileExtension}`;
 
                     // 鑾峰彇 nonce
                     const imageNonce = await page.evaluate(() => {
@@ -1274,8 +1275,6 @@ class YouProvider {
                         console.log(`Image uploaded successfully: ${fileName}`);
 
                     }
-                    // 娓呯┖ imageStorage
-                    imageStorage.clearAllImages();
                 }
             }
 
@@ -1831,7 +1830,7 @@ class YouProvider {
         }
 
         async function attemptPreTimeoutRecovery() {
-            if (preTimeoutRecoveryAttempted || timeoutRecoveryInProgress || responseStarted || isEnding || clientState.isClosed()) {
+            if (preTimeoutRecoveryAttempted || timeoutRecoveryInProgress || responseStarted || isEnding || isClientClosed()) {
                 return false;
             }
             preTimeoutRecoveryAttempted = true;
@@ -1904,7 +1903,7 @@ class YouProvider {
 
                 if (stream) {
                     heartbeatInterval = setInterval(() => {
-                        if (!isEnding && !clientState.isClosed()) {
+                        if (!isEnding && !isClientClosed()) {
                             emitter.emit("completion", traceId, `\r`);
                         } else {
                             clearInterval(heartbeatInterval);
@@ -1964,7 +1963,7 @@ class YouProvider {
             const scheduleNoResponseRetryTimeout = (timeoutMs = responseTimeoutTimer, stage = "initial") => {
                 clearTimeout(responseTimeout);
                 responseTimeout = setTimeout(async () => {
-                    if (!responseStarted && !clientState.isClosed()) {
+                    if (!responseStarted && !isClientClosed()) {
                         if (stage === "initial") {
                             const recovered = await attemptPreTimeoutRecovery();
                             if (recovered) {
@@ -1994,7 +1993,7 @@ class YouProvider {
                                 unusualQueryVolume: unusualQueryVolumeTriggered,
                             });
                         }
-                    } else if (clientState.isClosed()) {
+                    } else if (isClientClosed()) {
                         console.log("Client closed connection. Stop retrying.");
                         await cleanup();
                         emitter.emit("end", traceId);
@@ -2013,7 +2012,7 @@ class YouProvider {
 
             if (stream) {
                 heartbeatInterval = setInterval(() => {
-                    if (!isEnding && !clientState.isClosed()) {
+                    if (!isEnding && !isClientClosed()) {
                         emitter.emit("completion", traceId, `\r`);
                     } else {
                         clearInterval(heartbeatInterval);

@@ -91,3 +91,18 @@ test('startAutoUnlockTimer 会自动释放 session 和 browser 锁', async () =>
     assert.equal(manager.sessions['user@example.com'].locked, false);
     assert.equal(releasedBrowserId, 'browser_0');
 });
+
+test('getSessionByStrategy 在饱和时直接抛出繁忙错误', async () => {
+    const manager = createManager();
+    let callCount = 0;
+    manager.getAvailableSessions = async () => {
+        callCount += 1;
+        throw new Error('All sessions are saturated. No account is available now.');
+    };
+
+    await assert.rejects(
+        manager.getSessionByStrategy('round_robin'),
+        /All sessions are saturated/
+    );
+    assert.equal(callCount, 1);
+});
