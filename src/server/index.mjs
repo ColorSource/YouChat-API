@@ -655,11 +655,12 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
             });
 
         } catch (error) {
-            console.error("Request error:", error);
             stopSseKeepAlive();
             releaseSession();
 
             if (!res.headersSent && isCapacityError(error)) {
+                const modelName = jsonBody?.model || "unknown";
+                console.warn(`[Busy] OpenAI request rejected: ${error?.message || "capacity limit"} (model=${modelName})`);
                 res.setHeader("Access-Control-Allow-Origin", "*");
                 res.status(503).json({
                     error: {
@@ -670,6 +671,8 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
                 });
                 return;
             }
+
+            console.error("Request error:", error);
 
             const errorMessage = "Error occurred, please check the log.\n\n<pre>" + (error.stack || error) + "</pre>";
             if (!res.headersSent) {
@@ -1051,11 +1054,12 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
             });
 
         } catch (error) {
-            console.error("Request error:", error);
             stopSseKeepAlive();
             releaseSession();
 
             if (!res.headersSent && isCapacityError(error)) {
+                const modelName = proxyModel || "unknown";
+                console.warn(`[Busy] Anthropic request rejected: ${error?.message || "capacity limit"} (model=${modelName})`);
                 res.setHeader("Access-Control-Allow-Origin", "*");
                 res.status(503).json({
                     type: "error",
@@ -1066,6 +1070,8 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
                 });
                 return;
             }
+
+            console.error("Request error:", error);
 
             const errorMessage = "Error occurred, please check the log.\n\n<pre>" + (error.stack || error) + "</pre>";
             if (!res.headersSent) {
