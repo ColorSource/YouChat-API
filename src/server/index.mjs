@@ -152,6 +152,114 @@ const sessionManager = provider.getSessionManager();
 // 鍒濆鍖?RequestLogger
 const requestLogger = new RequestLogger();
 
+function renderLandingPage({baseUrl, revision, branch}) {
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YouChat API</title>
+  <style>
+    :root {
+      --bg: #f7f9fc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #dbe3ee;
+      --brand: #0ea5e9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #d9f3ff 0%, transparent 60%), var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .wrap {
+      max-width: 860px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+    h1 { margin: 0 0 10px; font-size: 30px; }
+    p { margin: 0 0 8px; color: var(--muted); }
+    h2 { margin: 22px 0 8px; font-size: 18px; }
+    ul { margin: 8px 0 0; padding-left: 20px; }
+    li { margin: 6px 0; }
+    code {
+      background: #eff6ff;
+      border: 1px solid #dbeafe;
+      border-radius: 6px;
+      padding: 2px 6px;
+      color: #1d4ed8;
+    }
+    pre {
+      margin: 10px 0 0;
+      background: #0b1220;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 10px;
+      overflow-x: auto;
+      border: 1px solid #1f2937;
+      font-size: 13px;
+    }
+    .meta {
+      margin-top: 14px;
+      font-size: 12px;
+      color: #64748b;
+    }
+    .badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #e0f2fe;
+      color: #0369a1;
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>YouChat API <span class="badge">Online</span></h1>
+      <p>This is an API endpoint, not a web app UI.</p>
+      <p>Use your client to call OpenAI-compatible or Anthropic-compatible routes.</p>
+
+      <h2>Available Endpoints</h2>
+      <ul>
+        <li><code>GET /v1/models</code></li>
+        <li><code>POST /v1/chat/completions</code> (OpenAI format)</li>
+        <li><code>POST /v1/messages</code> (Anthropic format)</li>
+      </ul>
+
+      <h2>Quick Start (OpenAI)</h2>
+      <pre>curl ${baseUrl}/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_PASSWORD" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}'</pre>
+
+      <h2>Quick Start (Anthropic)</h2>
+      <pre>curl ${baseUrl}/v1/messages \\
+  -H "x-api-key: YOUR_PASSWORD" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"claude-opus-4-6","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'</pre>
+
+      <div class="meta">Version: ${revision}@${branch}</div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 function startSseKeepAlive(res, intervalMs = 8000) {
     let closed = false;
     const sendHeartbeat = () => {
@@ -191,6 +299,15 @@ app.use((req, res, next) => {
     } else {
         next();
     }
+});
+
+app.get("/", (req, res) => {
+    const {revision, branch} = getGitRevision();
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const protocol = forwardedProto || req.protocol || "http";
+    const host = req.get("host") || `127.0.0.1:${port}`;
+    const baseUrl = `${protocol}://${host}`;
+    res.status(200).type("html").send(renderLandingPage({baseUrl, revision, branch}));
 });
 
 // openai format model request
