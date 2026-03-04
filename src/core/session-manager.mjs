@@ -485,7 +485,14 @@ class SessionManager {
                 selectedSession.requestCount++;
 
                 // 鑾峰彇鍙敤娴忚鍣?
-                const browserInstance = await this.getAvailableBrowser();
+                let browserInstance;
+                try {
+                    browserInstance = await this.getAvailableBrowser();
+                } catch (error) {
+                    selectedSession.locked = false;
+                    selectedSession.requestCount = Math.max(0, selectedSession.requestCount - 1);
+                    throw error;
+                }
 
                 // 鍚姩鑷姩瑙ｉ攣璁℃椂鍣?
                 if (SESSION_LOCK_TIMEOUT > 0) {
@@ -510,7 +517,14 @@ class SessionManager {
                 if (selectedSession.modeStatus && selectedSession.modeStatus[selectedSession.currentMode]) {
                     selectedSession.locked = true;
                     selectedSession.requestCount++;
-                    const browserInstance = await this.getAvailableBrowser();
+                    let browserInstance;
+                    try {
+                        browserInstance = await this.getAvailableBrowser();
+                    } catch (error) {
+                        selectedSession.locked = false;
+                        selectedSession.requestCount = Math.max(0, selectedSession.requestCount - 1);
+                        throw error;
+                    }
 
                     if (SESSION_LOCK_TIMEOUT > 0) {
                         this.startAutoUnlockTimer(selectedUsername, browserInstance.id);
@@ -542,16 +556,22 @@ class SessionManager {
         const lockDurationMs = SESSION_LOCK_TIMEOUT * 1000;
 
         this.sessionAutoUnlockTimers[username] = setTimeout(async () => {
-            const session = this.sessions[username];
-            if (session && session.locked) {
-                console.warn(`Session "${username}" auto-unlocked after ${SESSION_LOCK_TIMEOUT}s`);
+            try {
+                const session = this.sessions[username];
+                if (session && session.locked) {
+                    console.warn(`Session "${username}" auto-unlocked after ${SESSION_LOCK_TIMEOUT}s`);
+                    await session.mutex.runExclusive(async () => {
+                        session.locked = false;
+                    });
+                }
 
-
-
-                await session.mutex.runExclusive(async () => {
-                    session.locked = false;
-                });
-
+                if (browserId) {
+                    await this.releaseBrowser(browserId);
+                }
+            } catch (error) {
+                console.error(`Failed to auto-unlock session "${username}":`, error);
+            } finally {
+                delete this.sessionAutoUnlockTimers[username];
             }
         }, lockDurationMs);
     }

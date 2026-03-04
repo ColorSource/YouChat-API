@@ -107,6 +107,8 @@ Most runtime options are defined in startup scripts. Important ones:
 - `USE_CUSTOM_MODE`: enable custom chat mode
 - `ENABLE_MODE_ROTATION`: rotate between modes
 - `UPLOAD_FILE_FORMAT`: `txt` or `docx`
+- `MAX_REQUEST_BODY_BYTES`: max request body size in bytes (default `1048576`)
+- `ENABLE_LOCAL_MESSAGE_DUMP`: set `true` to dump formatted prompt files for debugging (default `false`)
 
 Optional proxy environment variables:
 - `http_proxy`

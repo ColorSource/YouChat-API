@@ -12,6 +12,10 @@ import RequestLogger from '../logging/request-logger.mjs';
 const app = express();
 const port = process.env.PORT || 8080;
 const validApiKey = process.env.PASSWORD;
+const requestBodyLimitBytes = Number.parseInt(process.env.MAX_REQUEST_BODY_BYTES || "", 10) > 0
+    ? Number.parseInt(process.env.MAX_REQUEST_BODY_BYTES, 10)
+    : 1024 * 1024;
+const buildInfo = getGitRevision();
 const availableModels = [
     // OpenAI
     "gpt_5_2_thinking",
@@ -302,7 +306,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-    const {revision, branch} = getGitRevision();
+    const {revision, branch} = buildInfo;
     const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
     const protocol = forwardedProto || req.protocol || "http";
     const host = req.get("host") || `127.0.0.1:${port}`;
@@ -332,14 +336,33 @@ app.post("/v1/chat/completions", OpenAIApiKeyAuth, (req, res) => {
     req.rawBody = "";
     req.setEncoding("utf8");
     clientState.setClosed(false);
+    let payloadTooLarge = false;
+    let receivedBytes = 0;
 
     // 鎺ユ敹鏁版嵁
     req.on("data", function (chunk) {
+        if (payloadTooLarge) {
+            return;
+        }
+        receivedBytes += Buffer.byteLength(chunk, "utf8");
+        if (receivedBytes > requestBodyLimitBytes) {
+            payloadTooLarge = true;
+            res.status(413).json({
+                error: {
+                    code: 413,
+                    message: `Request body too large. Max ${requestBodyLimitBytes} bytes.`,
+                }
+            });
+            return;
+        }
         req.rawBody += chunk;
     });
 
     // 鏁版嵁鎺ユ敹瀹屾瘯鍚庡鐞嗚姹?
     req.on("end", async () => {
+        if (payloadTooLarge || res.headersSent) {
+            return;
+        }
         console.log("Handling OpenAI-format request.");
         res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -761,12 +784,31 @@ app.post("/v1/messages", AnthropicApiKeyAuth, (req, res) => {
     req.rawBody = "";
     req.setEncoding("utf8");
     clientState.setClosed(false);
+    let payloadTooLarge = false;
+    let receivedBytes = 0;
 
     req.on("data", function (chunk) {
+        if (payloadTooLarge) {
+            return;
+        }
+        receivedBytes += Buffer.byteLength(chunk, "utf8");
+        if (receivedBytes > requestBodyLimitBytes) {
+            payloadTooLarge = true;
+            res.status(413).json({
+                error: {
+                    code: 413,
+                    message: `Request body too large. Max ${requestBodyLimitBytes} bytes.`,
+                }
+            });
+            return;
+        }
         req.rawBody += chunk;
     });
 
     req.on("end", async () => {
+        if (payloadTooLarge || res.headersSent) {
+            return;
+        }
         console.log("Handling Anthropic-format request.");
         res.setHeader("Content-Type", "text/event-stream;charset=utf-8");
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1034,7 +1076,7 @@ function anthropicNormalizeMessages(messages) {
 
 // handle other
 app.use((req, res, next) => {
-    const {revision, branch} = getGitRevision();
+    const {revision, branch} = buildInfo;
     res.status(404).send("Not Found (YouChat_Proxy " + revision + "@" + branch + ")");
     console.log("Received request on invalid endpoint. Please check your API path.")
 });
